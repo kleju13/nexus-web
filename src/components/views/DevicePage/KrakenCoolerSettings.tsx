@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Image as ImageIcon, Lightbulb, Sparkles, Unplug } from 'lucide-react';
 import { EmptyState } from '../../common/EmptyState/EmptyState';
-import { SettingSelect, SettingSlider, SettingToggle } from '../../common/SettingRow/SettingRow';
+import { SettingRow, SettingSelect, SettingSlider, SettingToggle, type SettingState } from '../../common/SettingRow/SettingRow';
 import { Button } from '../../common/Button/Button';
 import { SettingsSection } from '../../common/SettingsSection/SettingsSection';
+import { TextInput } from '../../common/TextInput/TextInput';
 import {
+  KRAKEN_LCD_WEB_FPS_MAX,
+  KRAKEN_LCD_WEB_FPS_MIN,
   encodeKrakenFrame,
   getKrakenState,
   setKrakenLcd,
@@ -12,6 +15,8 @@ import {
   uploadKrakenLcdImage,
   uploadKrakenLcdKlipy,
   type KrakenLcdPatch,
+  type KrakenLcdSource,
+  type KrakenLcdWebState,
   type KrakenState,
 } from '../../../api/nzxt-kraken';
 import type { KlipyGif } from '../../../api/klipy';
@@ -34,6 +39,33 @@ const LCD_MODES: { value: KrakenState['lcdMode']; labelKey: string }[] = [
 
 const LCD_ROTATIONS = [0, 90, 180, 270];
 
+const LCD_SOURCES: { value: KrakenLcdSource; labelKey: string; noteKey: string }[] = [
+  { value: 'nexus', labelKey: 'devices.nzxt-kraken.screenSourceNexus', noteKey: 'devices.nzxt-kraken.screenSourceNexusNote' },
+  { value: 'web', labelKey: 'devices.nzxt-kraken.screenSourceWeb', noteKey: 'devices.nzxt-kraken.screenSourceWebNote' },
+  { value: 'device', labelKey: 'devices.nzxt-kraken.screenSourceDevice', noteKey: 'devices.nzxt-kraken.screenSourceDeviceNote' },
+];
+
+const WEB_STATES: Record<KrakenLcdWebState, { labelKey: string; tone: SettingState['tone'] }> = {
+  off: { labelKey: 'devices.nzxt-kraken.screenWebStateOff', tone: 'neutral' },
+  waiting: { labelKey: 'devices.nzxt-kraken.screenWebStateWaiting', tone: 'neutral' },
+  unsupported: { labelKey: 'devices.nzxt-kraken.screenWebStateUnsupported', tone: 'warn' },
+  starting: { labelKey: 'devices.nzxt-kraken.screenWebStateStarting', tone: 'accent' },
+  running: { labelKey: 'devices.nzxt-kraken.screenWebStateRunning', tone: 'good' },
+  error: { labelKey: 'devices.nzxt-kraken.screenWebStateError', tone: 'warn' },
+  unavailable: { labelKey: 'devices.nzxt-kraken.screenWebStateUnavailable', tone: 'warn' },
+};
+
+/** What the service takes for the web source: empty (KrakenDial) or an http(s) address. */
+function isAllowedWebUrl(url: string): boolean {
+  if (url === '') return true;
+  try {
+    const parsed = new URL(url);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.host !== '' && url.length <= 2048;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The Kraken's hardware options: cooling readout, the LCD's own display controls,
  * and the RGB channel summary. Hosted by the LCD panel page's settings tab, and by
@@ -41,9 +73,9 @@ const LCD_ROTATIONS = [0, 90, 180, 270];
  */
 export function KrakenCoolerSettings({ onSectionNavigate, screenStreamed = false }: {
   onSectionNavigate?: (section: string) => void;
-  // True when a panel session owns the LCD. It re-activates its own bucket every frame,
-  // so a display mode or a still image picked here is overwritten within a frame period;
-  // the controls that lose are hidden rather than left there looking broken.
+  // True when a panel session owns the LCD. It sends a frame many times a second, so a
+  // display mode or a still image picked here is overwritten within a frame period; the
+  // controls that lose are hidden rather than left there looking broken.
   screenStreamed?: boolean;
 }) {
   const { t } = useTranslation();
@@ -62,6 +94,9 @@ export function KrakenCoolerSettings({ onSectionNavigate, screenStreamed = false
   const brightnessDirtyRef = useRef(false);
   // Same guard for the sleep toggle while its write is in flight.
   const sleepDirtyRef = useRef(false);
+  // And for the web page's frame rate while its thumb is dragged.
+  const webFpsDirtyRef = useRef(false);
+  const [webUrlInvalid, setWebUrlInvalid] = useState(false);
 
   const refresh = useCallback(async () => {
     const s = await getKrakenState();
@@ -77,6 +112,7 @@ export function KrakenCoolerSettings({ onSectionNavigate, screenStreamed = false
       let merged = s;
       if (brightnessDirtyRef.current) merged = { ...merged, lcdBrightness: prev.lcdBrightness };
       if (sleepDirtyRef.current) merged = { ...merged, lcdSleepWhenLocked: prev.lcdSleepWhenLocked };
+      if (webFpsDirtyRef.current) merged = { ...merged, lcdWebFps: prev.lcdWebFps };
       return merged;
     });
   }, []);
@@ -97,12 +133,24 @@ export function KrakenCoolerSettings({ onSectionNavigate, screenStreamed = false
   const commitLcd = useCallback(async (patch: KrakenLcdPatch) => {
     setSaving(true);
     try {
-      await setKrakenLcd(patch);
+      const ok = (await setKrakenLcd(patch)) !== null;
       await refresh();
+      return ok;
     } finally {
       if (aliveRef.current) setSaving(false);
     }
   }, [refresh]);
+
+  const commitWebUrl = useCallback(async (raw: string) => {
+    const url = raw.trim();
+    if (!isAllowedWebUrl(url)) {
+      setWebUrlInvalid(true);
+      return;
+    }
+    setWebUrlInvalid(false);
+    if (url === state?.lcdWebUrl) return;
+    if (!(await commitLcd({ webUrl: url })) && aliveRef.current) setWebUrlInvalid(true);
+  }, [commitLcd, state?.lcdWebUrl]);
 
   const onPickImage = useCallback(async (file: File | undefined) => {
     if (!file || !state) return;
@@ -158,6 +206,21 @@ export function KrakenCoolerSettings({ onSectionNavigate, screenStreamed = false
   }
 
   const loaded = state !== null;
+  // Models without the streaming buffer keep their own screens: a still, a panel or a page
+  // would go through a memory bucket, which writes the cooler's flash.
+  const streams = state?.lcdStream === true;
+  const source: KrakenLcdSource = streams ? (state?.lcdSource ?? 'nexus') : 'device';
+  // The overlay draws the panel only while its session is up; until then the cooler's
+  // own controls still apply.
+  const deviceControls = source === 'device' || (source === 'nexus' && !screenStreamed);
+  const sourceOption = LCD_SOURCES.find(s => s.value === source);
+  const webState = state?.lcdWebState ? WEB_STATES[state.lcdWebState] : undefined;
+  const webBrowser = state?.lcdWebBrowser ?? '';
+  const webFps = formatNumber(state?.lcdWebActualFps ?? 0, numberFormat, { maximumFractionDigits: 1 });
+  const webDetail = state?.lcdWebState === 'running'
+    ? t((state.lcdWebBackground ?? 0) > 0 ? 'devices.nzxt-kraken.screenWebRunningLoop' : 'devices.nzxt-kraken.screenWebRunning',
+      { fps: webFps, browser: webBrowser })
+    : state?.lcdWebError ?? undefined;
 
   return (
     <>
@@ -196,18 +259,89 @@ export function KrakenCoolerSettings({ onSectionNavigate, screenStreamed = false
           </p>
         ) : (
           <>
-            {screenStreamed ? (
+            {loaded && !streams && (
+              <p className={styles.customNote} data-settings-aside="true">
+                {t('devices.nzxt-kraken.screenStreamUnavailable')}
+              </p>
+            )}
+            {streams && (
+              <SettingSelect
+                label={t('devices.nzxt-kraken.screenSource')}
+                value={source}
+                onChange={v => { void commitLcd({ source: v as KrakenLcdSource }); }}
+                options={LCD_SOURCES.map(s => ({ value: s.value, label: t(s.labelKey) }))}
+                description={sourceOption ? t(sourceOption.noteKey) : undefined}
+                descriptionBelow
+                disabled={!loaded || saving}
+              />
+            )}
+
+            {source === 'nexus' && screenStreamed && (
               <p className={styles.customNote} data-settings-aside="true">
                 {t('devices.nzxt-kraken.screenOwnedByPanel')}
               </p>
-            ) : (
-            <SettingSelect
-              label={t('devices.nzxt-kraken.screenMode')}
-              value={state?.lcdMode ?? 'liquid'}
-              onChange={v => { void commitLcd({ mode: v as KrakenState['lcdMode'] }); }}
-              options={LCD_MODES.map(m => ({ value: m.value, label: t(m.labelKey) }))}
-              disabled={!loaded}
-            />
+            )}
+            {deviceControls && (
+              <SettingSelect
+                label={t('devices.nzxt-kraken.screenMode')}
+                value={state?.lcdMode ?? 'liquid'}
+                onChange={v => { void commitLcd({ mode: v as KrakenState['lcdMode'] }); }}
+                options={LCD_MODES.filter(m => streams || m.value !== 'image').map(m => ({ value: m.value, label: t(m.labelKey) }))}
+                disabled={!loaded}
+              />
+            )}
+
+            {source === 'web' && (
+              <>
+                <SettingRow
+                  label={t('devices.nzxt-kraken.screenWebUrl')}
+                  description={webUrlInvalid ? t('devices.nzxt-kraken.screenWebUrlInvalid') : t('devices.nzxt-kraken.screenWebUrlNote')}
+                  descriptionBelow
+                  disabled={!loaded}
+                >
+                  <TextInput
+                    value={state?.lcdWebUrl ?? ''}
+                    size="sm"
+                    mono
+                    maxLength={2048}
+                    autoComplete="off"
+                    ariaLabel={t('devices.nzxt-kraken.screenWebUrl')}
+                    invalid={webUrlInvalid}
+                    disabled={!loaded || saving}
+                    onInput={() => { if (webUrlInvalid) setWebUrlInvalid(false); }}
+                    onSubmit={v => { void commitWebUrl(v); }}
+                    onBlur={v => { void commitWebUrl(v); }}
+                  />
+                </SettingRow>
+                <SettingSlider
+                  editable
+                  label={t('devices.nzxt-kraken.screenWebFps')}
+                  value={state?.lcdWebFps ?? 10}
+                  min={KRAKEN_LCD_WEB_FPS_MIN}
+                  max={KRAKEN_LCD_WEB_FPS_MAX}
+                  step={1}
+                  formatValue={v => localizeNumbers(`${v}`, numberFormat)}
+                  ariaLabel={t('devices.nzxt-kraken.screenWebFpsAria')}
+                  disabled={!loaded}
+                  onChange={(v: number, commit?: boolean) => {
+                    if (!state) return;
+                    webFpsDirtyRef.current = true;
+                    setState({ ...state, lcdWebFps: v });
+                    if (commit) void commitLcd({ webFps: v }).finally(() => { webFpsDirtyRef.current = false; });
+                  }}
+                  onCommit={(v: number) => {
+                    void commitLcd({ webFps: v }).finally(() => { webFpsDirtyRef.current = false; });
+                  }}
+                />
+                {webState && (
+                  <SettingRow
+                    label={t('devices.nzxt-kraken.screenWebState')}
+                    description={webDetail}
+                    descriptionBelow
+                    state={{ label: t(webState.labelKey), tone: webState.tone }}
+                  />
+                )}
+              </>
             )}
 
             <SettingSlider
@@ -259,7 +393,7 @@ export function KrakenCoolerSettings({ onSectionNavigate, screenStreamed = false
               disabled={!loaded}
             />
 
-            {!screenStreamed && (
+            {deviceControls && streams && (
               <>
             <input
               ref={fileRef}

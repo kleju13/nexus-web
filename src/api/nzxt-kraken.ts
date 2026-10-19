@@ -22,16 +22,49 @@ export interface KrakenState {
   lcdMode: 'liquid' | 'image' | 'off';
   /** Absent/null = on. */
   lcdSleepWhenLocked?: boolean | null;
-  /** True when the attached model plays an uploaded GIF by itself (Kraken Z3 only). */
+  /**
+   * True when the attached model plays an uploaded GIF by itself. Always false in this
+   * edition: that takes a memory bucket, which writes the cooler's flash.
+   */
   lcdGif?: boolean;
+  /**
+   * True when frames reach the LCD through the streaming buffer: stills, the Nexus panel
+   * and web pages. False on models that keep their own screens only.
+   */
+  lcdStream?: boolean;
+  /** What draws the LCD. */
+  lcdSource?: KrakenLcdSource;
+  /** The page shown for the "web" source; the service fills in KrakenDial when unset. */
+  lcdWebUrl?: string;
+  lcdWebFps?: number;
+  lcdWebState?: KrakenLcdWebState;
+  lcdWebError?: string | null;
+  /** The browser drawing the page, e.g. "Microsoft Edge". */
+  lcdWebBrowser?: string | null;
+  /** Frames a second the page sent over the last two seconds. */
+  lcdWebActualFps?: number;
+  /** Frames of the background loop the page handed over; 0 while it draws its own. */
+  lcdWebBackground?: number;
   channels: KrakenChannel[];
 }
+
+/** "nexus": the Nexus panel; "web": a web page such as KrakenDial; "device": the cooler's own screens or a still. */
+export type KrakenLcdSource = 'nexus' | 'web' | 'device';
+
+export type KrakenLcdWebState = 'off' | 'waiting' | 'unsupported' | 'starting' | 'running' | 'error' | 'unavailable';
+
+export const KRAKEN_LCD_WEB_FPS_MIN = 1;
+export const KRAKEN_LCD_WEB_FPS_MAX = 30;
 
 export interface KrakenLcdPatch {
   brightness?: number;
   orientation?: number;
   mode?: KrakenState['lcdMode'];
   sleepWhenLocked?: boolean;
+  source?: KrakenLcdSource;
+  /** Empty puts KrakenDial back. */
+  webUrl?: string;
+  webFps?: number;
 }
 
 export function getKrakenState(): Promise<KrakenState | null> {
